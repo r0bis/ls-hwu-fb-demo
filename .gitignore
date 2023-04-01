@@ -1,0 +1,15 @@
+.Rproj.user
+.Rhistory
+.RData
+.DS_Store
+inst/doc
+doc
+Meta
+docs
+reference
+
+/.luarc.json
+*.properties
+data_backup/
+patientList-demo.pdf
+README.pdf

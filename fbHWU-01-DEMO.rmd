@@ -1,0 +1,230 @@
+--- 
+title: "PD Stream patient progress report"
+author: "HWU"
+date: "`r format(Sys.time(), '%d %B, %Y @ %H:%M')`"
+output: pdf_document
+papersize: a4
+header-includes:    
+    - \usepackage{longtable}
+    - \usepackage{booktabs}
+    - \usepackage{array}
+    - \usepackage{multirow}
+    - \usepackage{wrapfig}
+    - \usepackage{float}
+    - \usepackage{colortbl}
+    - \usepackage{pdflscape}
+    - \usepackage{tabu}
+    - \usepackage{threeparttable}
+---
+
+```{r setup, include=FALSE}
+### Variables:
+
+linePath = TRUE
+lineSmooth = FALSE
+showStdError = FALSE
+spanValue = 0.3
+
+### Libraries:
+
+library(limer)
+library(properties)
+#library(ggthemr)
+library(ggthemes)
+library(cowplot)
+library(tikzDevice)
+library(kableExtra)
+library(sqldf)
+library(knitr)
+library(lubridate)
+library(tidyverse)
+library(scales)
+
+### Functions:
+
+fUniqVars <- function(x) {
+  # takes DF returns string vector of unique strings in DF
+  # unlist collapses list which then can be pased to unique
+  y <- unique(unlist(c(x)))
+  return(y)
+  }
+
+
+# read properties - aka parameters / variables
+props <- read.properties("script.properties")
+
+# knitr::opts_knit$set(root.dir = './out/')
+
+if (props$onePerson=="YES") {
+  onePerson <- TRUE
+  onePersonNumber <- as.integer(props$onePersonNumber)
+  if (is.na(onePersonNumber)) {
+    stop('You want graphs for one patient, but patient number is wrong or missing \n
+         Please check the .properties file to see if variable onePersonNumber is set')
+    }  
+  } else {
+    onePerson <- FALSE
+  }
+
+
+startDT <- ymd_hm(paste(props$dateStart, props$timeStart))
+endDT <- ymd_hm(paste(props$dateEnd, props$timeEnd))
+
+
+
+if (is.na(startDT)) {
+    stop('Start date or Time not in the right format in the properties file')
+  }  else if (is.na(endDT)) {
+    stop('Ending date or Time not in the right format in the properties file')  
+  }
+
+
+### Reading in data
+# GET data
+
+options(lime_api = props$limeAPI)
+options(lime_username = props$limeUser)
+options(lime_password = props$limePassword)
+
+### Reading in data
+
+skey <- get_session_key()
+if(skey == '') { stop("No connection to database. Is network running OK?")}
+
+initData <- get_responses(props$limeSurveyNumber)
+
+if (props$resetDemo == "YES") {
+  source("./resetDemoData.R")
+  print("DEMO data updated, reacquiring initial dataset")
+  initData <- get_responses(props$limeSurveyNumber)
+}
+
+# clear session with limesurvey, do not print output of this (via invisible)
+invisible(release_session_key())
+
+
+
+# remove trailing dot from column names and set date datatype on submitdate
+names(initData) <- gsub("\\.$", "", names(initData))
+initData <- initData %>% mutate(submitdate = ymd_hms(submitdate))
+initData <- initData %>% mutate(date = as_date(submitdate))
+initData <- initData %>% arrange(submitdate)
+initData <- initData %>% mutate(mdate = 
+             floor_date(date, unit = "week", week_start = getOption("lubridate.week.start", 1)))
+
+
+# proceed to rearrange data as needed
+df.lines.feeling <- initData %>%
+  select(date,mdate,id=Q003ID,feeling=Q001SL.SQ001) %>% 
+  filter(date >= startDT) %>% 
+  filter(date <= endDT)
+if(onePerson) { df.lines.feeling <- df.lines.feeling %>% 
+  filter(., id==onePersonNumber)
+  }
+
+df.avg.feeling <- df.lines.feeling %>%
+  dplyr::group_by(mdate) %>%
+  summarise(feeling=mean(feeling))
+
+# PLOT for Feeling lines
+p.lines.individual <- ggplot(df.lines.feeling,aes(x=mdate,y=feeling, colour=as.factor(id))) +
+  {if (lineSmooth) stat_smooth(geom="line",aes(x=mdate,y = feeling, color = as.factor(id)), span = spanValue, se = showStdError, alpha = 0.5)} +
+  {if (linePath) geom_path(aes(x = mdate, y = feeling, color = as.factor(id)))} +
+  {if (!onePerson) geom_line(data=df.avg.feeling,aes(x=mdate,y=feeling,colour="AVG for Unit"),alpha = 0.8, size = 3)} +
+  labs(title = paste("Feeling over time on 100% scale from",
+                     format(as_datetime(min(initData$submitdate)),"%b %Y"),
+                     "until",
+                     format(as_datetime(max(initData$submitdate)),"%b %Y")
+                     ), x = NULL, y = "feeling", color="Patients") +
+  scale_y_continuous(breaks=pretty_breaks(), limits=c(0,100)) +
+  theme_minimal()
+
+
+df.lines.emergencies <- initData %>% 
+  select(date,mdate,id=Q003ID,ae=Q002MC.SQ001,police=Q002MC.SQ002,apts=Q002MC.SQ003) %>% 
+  filter(date >= startDT) %>% 
+  filter(date <= endDT)
+if(onePerson) {df.lines.emergencies <- df.lines.emergencies %>% 
+  filter(id==onePersonNumber)
+  }
+
+df.avg.ae <- df.lines.emergencies %>%
+  select(date,mdate,ae) %>%
+  group_by(mdate) %>%
+  summarise(ae=mean(ae))
+
+# get top scale limit for Y axis for emergencies
+maxEmergencyNumber <- df.lines.emergencies %>% select(ae,police,apts) %>% max(.,na.rm = TRUE)
+if (maxEmergencyNumber <=10) {
+  maxEmergencyNumber <- 10
+}
+
+# PLOT for A&E attendance lines
+p.lines.ae <- ggplot(df.lines.emergencies,aes(x=mdate,y=ae,colour=as.factor(id))) +
+  {if (lineSmooth) stat_smooth(geom="line",aes(x=mdate,y = ae, color = as.factor(id)), span = spanValue, se = showStdError, alpha = 0.5)} +
+  {if (linePath) geom_path(aes(x = mdate, y = ae, color = as.factor(id)),alpha=0.6)} +
+  {if (!onePerson) geom_line(data=df.avg.ae,aes(x=mdate,y=ae,colour="AVG for Unit"),alpha=0.8,size=3)} +
+  labs(title = "A&E attendance / admissions", x=NULL, y="A&E or admissions") +
+  scale_y_continuous(breaks=seq(0,maxEmergencyNumber,2), limits=c(0,maxEmergencyNumber)) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+df.avg.police <- df.lines.emergencies %>%
+  select(date,mdate,police) %>%
+  group_by(mdate) %>%
+  summarise(police=mean(police))
+
+# PLOT for Police contact lines
+p.lines.police <- ggplot(df.lines.emergencies,aes(x=mdate,y=police,colour=as.factor(id))) +
+  {if (lineSmooth) stat_smooth(geom="line",aes(x=mdate,y = police, color = as.factor(id)), span = spanValue, se = showStdError, alpha = 0.6)} +
+  {if (linePath) geom_path(aes(x = mdate, y = police, color = as.factor(id)),alpha=0.6)} +
+  {if (!onePerson) geom_line(data=df.avg.police,aes(x=mdate,y=police,colour="AVG for Unit"),alpha=0.8,size=3)} +
+  labs(title = "Police contacts", x=NULL, y="Police contact") +
+  scale_y_continuous(breaks=seq(0,maxEmergencyNumber,2), limits=c(0,maxEmergencyNumber)) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+df.avg.apts <- df.lines.emergencies %>%
+  select(date,mdate,apts) %>%
+  group_by(mdate) %>%
+  summarise(apts=mean(apts))
+
+# PLOT for Missed Appointments lines (this has legend!)
+p.lines.apts <- ggplot(df.lines.emergencies,aes(x=mdate,y=apts,colour=as.factor(id))) +
+  {if (lineSmooth) stat_smooth(geom="line",aes(x=mdate,y = apts, color = as.factor(id)), span = spanValue, se = showStdError, alpha = 0.6)} +
+  {if (linePath) geom_path(aes(x = mdate, y = apts, color = as.factor(id)),alpha=0.6)} +
+  {if (!onePerson) geom_line(data=df.avg.apts,aes(x=mdate,y=apts,colour="AVG for Unit"),alpha=0.8,size=3)} +
+  labs(title = "Crisis contacts", x=NULL, y="Number of CRHT", color = "Patients") +
+  scale_y_continuous(breaks=seq(0,maxEmergencyNumber,2), limits=c(0,maxEmergencyNumber)) +
+  theme_minimal() 
+
+
+# PLOT 3in1 - put together three service (mis)use indicators
+p.3in1 <- plot_grid(p.lines.ae,p.lines.police,p.lines.apts, labels = "AUTO", nrow = 1, ncol = 3, align = "vh", axis = "tb", rel_widths = c(1,1,1.3))
+```
+
+# HWU Weekly Coping estimate 
+
+We are asking our patients at the beginning of each weekly individual session (typically weekly or fortnightly) to tell us how they have felt overall for the past week on scale from 0 to 100 %. We also ask how many times they have been in contact with emergency or crisis services. We think that patients can remember the previous week quite accurately. 
+
+\vspace{15mm}
+
+```{r PlotFeeling, echo=F, warning=F, error=F, message=F}
+p.lines.individual
+
+```
+
+
+
+\newgeometry{left=0.5in,right=0.5in,top=0.5in,bottom=0.5in,nohead}
+\begin{landscape}
+```{r Plot3in1, echo=F, warning=F,error=F, message=F, fig.align='center', fig.width = 26/2.54, fig.height = 18/2.54}
+
+# page margins needed to be decreased to avoid blank page before the 3in1 plot
+
+p.3in1
+
+```
+\end{landscape}
